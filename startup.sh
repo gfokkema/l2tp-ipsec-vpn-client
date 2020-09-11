@@ -1,26 +1,58 @@
 #!/bin/sh
 
-# template out all the config files using env vars
-sed -i 's/right=.*/right='$VPN_SERVER_IPV4'/' /etc/ipsec.conf
-echo ': PSK "'$VPN_PSK'"' > /etc/ipsec.secrets
-sed -i 's/lns = .*/lns = '$VPN_SERVER_IPV4'/' /etc/xl2tpd/xl2tpd.conf
-sed -i 's/name .*/name '$VPN_USERNAME'/' /etc/ppp/options.l2tpd.client
-sed -i 's/password .*/password '$VPN_PASSWORD'/' /etc/ppp/options.l2tpd.client
+set -euxo pipefail
+
+[ -z ${VPN_CONN_NAME} ] && exit 1
+[ -z ${VPN_CLIENT_IPV4} ] && exit 1
+[ -z ${VPN_CLIENT_SUBNET} ] && exit 1
+[ -z ${VPN_CLIENT_GW} ] && exit 1
+[ -z ${VPN_SERVER_IPV4} ] && exit 1
+[ -z ${VPN_SERVER_SUBNET} ] && exit 1
+[ -z ${VPN_PSK} ] && exit 1
+VPN_IF=${VPN_IF:-dummy0}
+
+IKE_ALG=${IKE_ALG:-aes256-sha2_512;dh20}
+P2=${P2:-esp}
+P2_ALG=${P2_ALG:-aes256-sha2_512;dh20}
+
+cat > /etc/ipsec.d/vpn.conf <<EOF
+conn ${VPN_CONN_NAME}
+    # general
+    type=tunnel
+    left=${VPN_CLIENT_IPV4}
+    leftsubnet=${VPN_CLIENT_SUBNET}
+    leftupdown=%disabled
+    right=${VPN_SERVER_IPV4}
+    rightsubnet=${VPN_SERVER_SUBNET}
+
+    # keying
+    auto=start
+    authby=secret
+
+    ike=${IKE_ALG}
+    phase2=${P2}
+    phase2alg=${P2_ALG}
+
+    dpddelay=15
+    dpdtimeout=30
+    dpdaction=clear
+    ikev2=yes
+    ikelifetime=86400s
+    keylife=1h
+    rekey=yes
+EOF
+
+cat > /etc/ipsec.d/vpn.secrets <<EOF
+: PSK "${VPN_PSK}"
+EOF
+
+VPN_CLIENT_MASK=$(echo ${VPN_CLIENT_SUBNET} | cut -d '/' -f2)
+
+ip link add ${VPN_IF} type dummy
+ip link set ${VPN_IF} up
+ip address add ${VPN_CLIENT_GW}/${VPN_CLIENT_MASK} dev ${VPN_IF}
+ip route add ${VPN_SERVER_SUBNET} dev ${VPN_IF} src ${VPN_CLIENT_GW}
 
 # startup ipsec tunnel
 ipsec initnss
-sleep 1
-ipsec pluto --stderrlog --config /etc/ipsec.conf
-sleep 5
-#ipsec setup start
-#sleep 1
-#ipsec auto --add L2TP-PSK
-#sleep 1
-ipsec auto --up L2TP-PSK
-sleep 3
-ipsec --status
-sleep 3
-
-# startup xl2tpd ppp daemon then send it a connect command
-(sleep 7 && echo "c myVPN" > /var/run/xl2tpd/l2tp-control) &
-exec /usr/sbin/xl2tpd -p /var/run/xl2tpd.pid -c /etc/xl2tpd/xl2tpd.conf -C /var/run/xl2tpd/l2tp-control -D
+ipsec pluto --stderrlog --config /etc/ipsec.conf --nofork
